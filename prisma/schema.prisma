@@ -1,0 +1,180 @@
+// Friday Paddle — data model
+// Event (definition) vs. Occurrence (instance): one Event maps to one Occurrence
+// (one-time) or many (recurring). Status — Locked In / Pending / Waitlisted — is
+// never stored; it's computed from a signup's position, the live active count,
+// and the event's rules (capacity, requiresCompleteGroups).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Gender {
+  man
+  woman
+}
+
+enum ReachMode {
+  subscription // recurring events: invite opted-in subscribers
+  broadcast    // one-time events: invite all eligible players
+}
+
+enum GenderCategory {
+  men
+  women
+  mixed
+}
+
+enum OccurrenceState {
+  scheduled // created; signups not open yet
+  open      // accepting signups
+  closed    // signups closed (cancel deadline passed)
+  confirmed // met minimum-to-hold; game is on
+  cancelled // below minimum, or cancelled by organizer
+}
+
+enum SignupState {
+  active
+  cancelled
+}
+
+enum OfferState {
+  pending
+  accepted
+  declined
+  expired
+}
+
+model Player {
+  id           String    @id @default(cuid())
+  phone        String    @unique // verified contact + identity key
+  name         String
+  gender       Gender
+  level        Int       // odd 7–31, 7 = most advanced; values come from the Level list
+  token        String    @unique // app-generated random magic-link identifier
+  isSuperAdmin Boolean   @default(false)
+  commsPaused  Boolean   @default(false) // global mute, separate from per-event subscription
+  pauseUntil   DateTime? // optional auto-resume date for the mute
+  verifiedAt   DateTime? // set when the phone code is confirmed
+  consentedAt  DateTime? // set when SMS consent is given
+  createdAt    DateTime  @default(now())
+
+  organizedEvents Event[]
+  subscriptions   Subscription[]
+  signups         Signup[]
+  waitlistOffers  WaitlistOffer[]
+
+  @@map("players")
+}
+
+model Event {
+  id                     String         @id @default(cuid())
+  name                   String
+  createdById            String
+  reachMode              ReachMode
+  genderCategory         GenderCategory
+  levelMin               Int?           // null = no lower bound
+  levelMax               Int?           // null = no upper bound
+  capacity               Int            // player slots, e.g. 16
+  requiresCompleteGroups Boolean        @default(true) // enforce groups of 4 when true
+  minimumToHold          Int            @default(0)    // headcount needed to confirm the game
+  waitlistEnabled        Boolean        @default(true)
+  recurrenceRule         String?        // null = one-time; otherwise e.g. "weekly"
+  createdAt              DateTime       @default(now())
+
+  createdBy     Player         @relation(fields: [createdById], references: [id])
+  occurrences   Occurrence[]
+  subscriptions Subscription[]
+  reminderRules ReminderRule[]
+
+  @@map("events")
+}
+
+model Occurrence {
+  id             String          @id @default(cuid())
+  eventId        String
+  eventAt        DateTime        // when the game is played
+  signupsOpenAt  DateTime        // when signups open for this occurrence
+  cancelDeadline DateTime        // cancellations allowed until here
+  state          OccurrenceState @default(scheduled)
+  createdAt      DateTime        @default(now())
+
+  event          Event           @relation(fields: [eventId], references: [id])
+  signups        Signup[]
+  waitlistOffers WaitlistOffer[]
+
+  @@index([eventId])
+  @@map("occurrences")
+}
+
+model Signup {
+  id              String      @id @default(cuid())
+  occurrenceId    String
+  playerId        String?     // null when this row is a placeholder/guest
+  placeholderName String?     // set instead of playerId for a guest
+  sequence        Int         // position in line; fixes order, drives computed status
+  state           SignupState @default(active)
+  createdAt       DateTime    @default(now())
+
+  occurrence Occurrence @relation(fields: [occurrenceId], references: [id])
+  player     Player?    @relation(fields: [playerId], references: [id])
+
+  @@unique([occurrenceId, sequence]) // no two signups in one occurrence share a position
+  @@index([occurrenceId])
+  @@index([playerId])
+  @@map("signups")
+}
+
+model Subscription {
+  id        String   @id @default(cuid())
+  playerId  String
+  eventId   String
+  active    Boolean  @default(true) // toggled when a player unsubscribes / resubscribes
+  createdAt DateTime @default(now())
+
+  player Player @relation(fields: [playerId], references: [id])
+  event  Event  @relation(fields: [eventId], references: [id])
+
+  @@unique([playerId, eventId]) // one subscription row per player/event pair
+  @@map("subscriptions")
+}
+
+model WaitlistOffer {
+  id           String     @id @default(cuid())
+  occurrenceId String
+  playerId     String
+  state        OfferState @default(pending)
+  sentAt       DateTime   @default(now())
+  expiresAt    DateTime   // one hour after sentAt for Friday
+  createdAt    DateTime   @default(now())
+
+  occurrence Occurrence @relation(fields: [occurrenceId], references: [id])
+  player     Player     @relation(fields: [playerId], references: [id])
+
+  @@index([occurrenceId])
+  @@index([state])
+  @@map("waitlist_offers")
+}
+
+model ReminderRule {
+  id        String   @id @default(cuid())
+  eventId   String
+  label     String   // e.g. "signups open", "day-of reminder"
+  offset    String   // when to fire relative to the occurrence; exact format TBD
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id])
+
+  @@index([eventId])
+  @@map("reminder_rules")
+}
+
+model Level {
+  value Int @id // odd 7–31, 7 = most advanced; reference values for the level dropdown
+
+  @@map("levels")
+}
